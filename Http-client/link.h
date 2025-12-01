@@ -37,7 +37,7 @@ struct Link
         }
         else {
             link.protocol = ProtocolType::UNKNOWN;
-            return link; // Возвращаем "пустую" ссылку, если протокол неизвестен
+            throw std::runtime_error ("Unknown protocol! Check the link.");
         }
 
         // Удаление протокола
@@ -51,7 +51,7 @@ struct Link
         }
         else {
             link.hostName = trimmedUrl;
-            link.query.clear();
+            link.query = "/";
         }
 
         return link;

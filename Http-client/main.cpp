@@ -104,7 +104,12 @@ void parseLink(thread_pool& pool, const Link& link, int depth, std::shared_ptr<D
 {
 	try {
 
-		std::string html = getHtmlContent(link);
+		std::string html = getHtmlContent(link, pool, [&](const Link& newLink) {
+			// Добавляем новую ссылку в очередь
+			pool.submit([&pool, newLink, depth, db]() {
+				parseLink(pool, newLink, depth, db);
+				});
+			});
 
 		if (html.size() == 0)
 		{
@@ -125,7 +130,7 @@ void parseLink(thread_pool& pool, const Link& link, int depth, std::shared_ptr<D
 
 		if (depth > 0) {
 
-			std::vector<Link> links = extractLinks(html);
+			std::vector<Link> links = extractLinks(html, link);
 
 			for (auto& subLink : links) {
 				pool.submit([&pool, subLink, depth, db]() { parseLink(pool, subLink, depth - 1, db); });
@@ -155,6 +160,7 @@ int main()
 
 		const auto& spiderSettings = Config::getInstance().getSpiderSettings();
 		Link link = Link::parse(spiderSettings.mainLink);
+		std::cout << "working link: " << getLinkText(link) << std::endl;
 		int depth = std::stoi(spiderSettings.depth);
 
 		test.submit([&test, link, depth, currDB]() { parseLink(test, link, depth, currDB); });

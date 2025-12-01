@@ -65,4 +65,16 @@ add_subdirectory(Config)
 
 add_subdirectory(DB-service)
 
-file(COPY Config/config.ini DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+set(CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/Config/config.ini")
+set(DESTINATION_FILE "${CMAKE_CURRENT_BINARY_DIR}/config.ini")
+
+add_custom_command(
+    OUTPUT ${DESTINATION_FILE}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CONFIG_FILE} ${DESTINATION_FILE}
+    DEPENDS ${CONFIG_FILE}  # Зависимость от исходного файла
+    COMMENT "Copying config.ini to the build directory"
+)
+
+# Создаем пользовательскую цель, которая будет зависеть от нашего кастомного комманда
+add_custom_target(copy_config ALL DEPENDS ${DESTINATION_FILE})
+

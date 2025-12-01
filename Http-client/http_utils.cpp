@@ -37,7 +37,32 @@ bool isText(const boost::beast::multi_buffer::const_buffers_type& b)
 	return true;
 }
 
-std::string getHtmlContent(const Link& link)
+Link linkExtractFromText(std::string& linkText) {
+	Link link;
+	if (linkText.find("https://") == 0) {
+		link.protocol = ProtocolType::HTTPS;
+		linkText.erase(0, 8); // Удаляем "https://"
+	}
+	else if (linkText.find("http://") == 0) {
+		link.protocol = ProtocolType::HTTP;
+		linkText.erase(0, 7); // Удаляем "http://"
+	}
+
+	auto query_start = linkText.find('/');
+	if (query_start != std::string::npos) {
+		link.hostName = linkText.substr(0, query_start);
+		link.query = linkText.substr(query_start);
+	}
+	else {
+		link.hostName = linkText;
+		link.query = "";
+	}
+
+	return link;
+}
+
+std::string getHtmlContent(const Link& link, thread_pool& pool,
+	const std::function<void(const Link&)>& onRedirect)
 {
 	std::string result;
 	try
@@ -81,17 +106,40 @@ std::string getHtmlContent(const Link& link)
 
 			beast::flat_buffer buffer;
 			http::response<http::dynamic_body> res;
-			http::read(stream, buffer, res);
-
-			if (isText(res.body().data()))
-			{
-				result = buffers_to_string(res.body().data());
-
-				result = adaptationText(res, result);
+			try {
+				http::read(stream, buffer, res);
 			}
-			else
-			{
-				std::cout << "This is not a text link, bailing out..." << std::endl;
+			catch (const beast::system_error& e) {
+				std::cerr << "Error during http::read: " << e.what() << std::endl;
+				return result;
+			}
+
+			int status_code = res.result_int();
+
+			if (status_code == 200) {
+				if (isText(res.body().data())) {
+					result = buffers_to_string(res.body().data());
+					result = adaptationText(res, result);
+				}
+				else {
+					std::cout << "This is not a text link, bailing out..." << std::endl;
+				}
+			}
+			else {
+				if (status_code == 301 || status_code == 302 || status_code == 307 || status_code == 308) {
+					auto it = res.find("Location");
+					if (it != res.end()) {
+						std::string finalUrl = std::string(it->value());
+						Link newLink = linkExtractFromText(finalUrl);
+						onRedirect(newLink); // redirect
+					}
+				}
+				else if (status_code >= 400 && status_code < 500) {
+					throw std::runtime_error("Client error: " + std::to_string(status_code));
+				}
+				else if (status_code >= 500) {
+					throw std::runtime_error("Server error: " + std::to_string(status_code));
+				}
 			}
 
 			beast::error_code ec;
@@ -121,17 +169,42 @@ std::string getHtmlContent(const Link& link)
 
 			beast::flat_buffer buffer;
 			http::response<http::dynamic_body> res;
-			http::read(stream, buffer, res);
-
-			if (isText(res.body().data()))
-			{
-				result = buffers_to_string(res.body().data());
-
-				result = adaptationText(res, result);
+			try {
+				http::read(stream, buffer, res);
 			}
-			else
-			{
-				std::cout << "This is not a text link, bailing out..." << std::endl;
+			catch (const beast::system_error& e) {
+				std::cerr << "Error during http::read: " << e.what() << std::endl;
+				return result;
+			}
+
+			int status_code = res.result_int();
+
+			if (status_code == 200) {
+				if (isText(res.body().data())) {
+					result = buffers_to_string(res.body().data());
+					result = adaptationText(res, result);
+				}
+				else {
+					std::cout << "This is not a text link, bailing out..." << std::endl;
+				}
+			}
+			else {
+				if (status_code == 301 || status_code == 302 || status_code == 307 || status_code == 308) {
+
+					auto it = res.find("Location");
+					if (it != res.end()) {
+						std::string finalUrl = std::string(it->value());
+						Link newLink = linkExtractFromText(finalUrl);
+						std::cout << "redirect to: " << finalUrl << std::endl;
+						onRedirect(newLink);
+					}
+				}
+				else if (status_code >= 400 && status_code < 500) {
+					throw std::runtime_error("Client error: " + std::to_string(status_code));
+				}
+				else if (status_code >= 500) {
+					throw std::runtime_error("Server error: " + std::to_string(status_code));
+				}
 			}
 
 			beast::error_code ec;
@@ -153,7 +226,7 @@ std::string getHtmlContent(const Link& link)
 	return result;
 }
 
-std::vector<Link> extractLinks(const std::string& html) {
+std::vector<Link> extractLinks(const std::string& html, const Link& currLink) {
 
 	std::vector<Link> links;
 
@@ -163,12 +236,20 @@ std::vector<Link> extractLinks(const std::string& html) {
 	auto iter = html.begin();
 	auto end = html.end();
 
+	bool relative = false;
+
 	try {
 		while (boost::regex_search(iter, end, match, regex)) {
 			std::string url = match[1]; // Значение href
 
+			// Игнорируем сноски
+			if (url.find('#') != std::string::npos) {
+				iter = match[0].second;
+				continue;
+			}
 			// Извлечение протокола и хоста
 			Link link;
+			// Проверяем, есть ли протокол в URL
 			if (url.find("https://") == 0) {
 				link.protocol = ProtocolType::HTTPS;
 				url.erase(0, 8); // Удаляем "https://"
@@ -177,30 +258,50 @@ std::vector<Link> extractLinks(const std::string& html) {
 				link.protocol = ProtocolType::HTTP;
 				url.erase(0, 7); // Удаляем "http://"
 			}
+			else if (url.find("//") == 0) {
+				link.protocol = currLink.protocol; // устанавливаем текущий протокол
+				url.erase(0, 2); // Удаляем "//"
+			}
 			else {
-				iter = match[0].second;
-				continue;
+				// Если ссылка относительная
+				link.protocol = currLink.protocol;
+				link.hostName = currLink.hostName;
+
+				relative = true;
 			}
 
 			auto query_start = url.find('/');
-			if (query_start != std::string::npos) {
-				link.hostName = url.substr(0, query_start);
-				link.query = url.substr(query_start);
+
+			if (relative) {
+				link.query = url;
+				relative = false;
 			}
 			else {
-				link.hostName = url;
-				link.query = "";
+				if (query_start != std::string::npos && url.back() != '/') {
+					link.hostName = url.substr(0, query_start);
+					link.query = url.substr(query_start);
+				}
+				else {
+					link.hostName = (url.back() == '/') ? url.substr(0, url.size() - 1) : url;
+					link.query = "/";
+				}
 			}
 
-			links.push_back(link);
+			if (!link.hostName.empty() && !link.query.empty()) { // Если ссылка корректная
+				links.push_back(link);
+			}
+			else {
+				std::cout << "link skipped: " << getLinkText(link) << std::endl;
+			}
 			iter = match[0].second;
 		}
 
-		return links;
 	}
 	catch (const std::exception& e) {
 		std::cout << e.what() << std::endl;
 	}
+
+	return links;
 
 }
 
@@ -236,7 +337,17 @@ std::string adaptationText(const boost::beast::http::response<http::dynamic_body
 
 std::string getLinkText(const Link& link)
 {
-	std::string textLink = link.protocol == ProtocolType::HTTPS ? "https://" : "http://";
+	std::string textLink;
+	if (link.protocol == ProtocolType::HTTPS) {
+		textLink = "https://";
+	}
+	else if (link.protocol == ProtocolType::HTTP) {
+		textLink = "http://";
+	}
+	else {
+		return "incorrent link";
+	}
+
 	textLink = textLink + link.hostName + link.query;
 
 	return textLink;
